@@ -1,0 +1,506 @@
+#!/usr/bin/perl
+=head1 NAME
+
+check_sansymphony - Nagios/Icinga Check for SANsymphonyV
+
+=head1 LICENSE
+
+Copyright (c) 2015 NETWAYS GmbH <info@netways.de>
+Copyright (c) 2015 Markus Frosch <markus.frosch@netways.de>
+
+This program is free software; you can redistribute it and/or modify
+it under the terms of the GNU General Public License as published by
+the Free Software Foundation; either version 2 of the License, or
+(at your option) any later version.
+
+This program is distributed in the hope that it will be useful,
+but WITHOUT ANY WARRANTY; without even the implied warranty of
+MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+GNU General Public License for more details.
+
+You should have received a copy of the GNU General Public License along
+with this program; if not, write to the Free Software Foundation, Inc.,
+51 Franklin Street, Fifth Floor, Boston, MA 02110-1301 USA.
+
+=head1 DESCRIPTION
+
+B<check_sansymphony> will check the monitoring status of a SANsymphonyV storage
+via SNMP.
+
+Make sure to enable the SNMP agent of SANsymphony, as well as the SNMP service
+of Windows, setting up a community and ACL access for the Nagios/Icinga
+machine.
+
+=head1 SYNOPSIS
+
+check_sansymphony -H <address> [-c <community>] [...]
+
+=head1 OPTIONS
+
+=over 4
+
+=item B<--help>
+
+Print the help
+
+=item B<--hostname, -H>
+
+Host address of the SNMP device
+
+=item B<--timeout, -t>
+
+Timeout in seconds for a SNMP request.
+
+Default: 10
+
+=item B<--community, -c>
+
+SNMP community to use
+
+Default: public
+
+=item B<--port, -p>
+
+SNMP port
+
+=item B<--domain>
+
+SNMP domain to use (udp, udp6, tcp, tcp6)
+
+=item B<--protocol, -P>
+
+SNMP protocol to use (either 1, 2 or 3)
+
+=item B<--include, -i>
+
+Included monitor types (first column)
+
+List of comma separated strings, can be specified multiple times.
+
+Default: all
+
+=item B<--exclude, -e>
+
+Excluded monitor types (first column)
+
+List of comma separated strings, can be specified multiple times.
+
+Default: none
+
+=item B<--username>
+
+SNMP username for SNMPv3
+
+=item B<--authpassword>
+
+SNMP authpassword for SNMPv3
+
+=item B<--authprotocol>
+
+SNMP authprotocol for SNMPv3
+
+=item B<--privpassword>
+
+SNMP privpassword for SNMPv3
+
+=item B<--privprotocol>
+
+SNMP privprotocol for SNMPv3
+
+=item B<--contextengineid>
+
+SNMP contextengineid for SNMPv3
+
+=item B<--contextname>
+
+SNMP contextname for SNMPv3
+
+=back
+
+=cut
+
+use warnings;
+use strict;
+use Getopt::Long qw(:config no_ignore_case bundling);
+use Pod::Usage;
+use Net::SNMP;
+use POSIX qw(strftime);
+
+use Data::Dump qw(dump);
+
+my $VERSION = 0.1;
+
+my $CACHE = 0;
+my $CACHENAME = '/tmp/check_sansymphony_'; # suffixed by address
+my $ADDRESS;
+
+my $INCLUDE = ();
+my $EXCLUDE = ();
+
+my $SNMP;
+my $SNMP_OPTIONS = {
+ community  => 'public',
+ timeout    => 10,
+ #version    => 2,
+ #maxmsgsize => 65535,
+};
+
+# MIBs we should know and care about
+my $MIBS = {
+  'DCSW-SSV-MONITOR-MIB' => {
+    'monitorTable'         => '1.3.6.1.4.1.7652.1.1',
+    'monitorEntry'         => '1.3.6.1.4.1.7652.1.1.1',
+    'monitorHashId'        => '1.3.6.1.4.1.7652.1.1.1.1',
+    'monitorId'            => '1.3.6.1.4.1.7652.1.1.1.2',
+    'monitorTargetId'      => '1.3.6.1.4.1.7652.1.1.1.3',
+    'monitorTargetCaption' => '1.3.6.1.4.1.7652.1.1.1.4',
+    'monitorState'         => '1.3.6.1.4.1.7652.1.1.1.5',
+    'monitorStateMessage'  => '1.3.6.1.4.1.7652.1.1.1.6',
+    'monitorDesc'          => '1.3.6.1.4.1.7652.1.1.1.7',
+  },
+};
+
+# state to nagios mapping
+my $STATES = {
+  'healthy'   => 0,
+  'undefined' => 0,
+  'warning'   => 1,
+  'attention' => 2,
+  'critical'  => 2,
+};
+my $STATENAMES = {
+  0 => 'OK',
+  1 => 'WARNING',
+  2 => 'CRITICAL',
+  3 => 'UNKNOWN',
+};
+
+# exit properly on an error
+sub exit_error {
+  print "UNKNOWN - ".shift()."\n";
+  pod2usage() if shift();
+  exit(3);
+}
+
+# parse options
+sub get_options {
+  my ($help, $version);
+  my (@include, @exclude);
+  GetOptions (
+    "help|h"            => \$help,
+    "version|V"         => \$version,
+    "cache=i"           => \$CACHE,
+    "hostname|H=s"      => \$ADDRESS,
+    "include|i=s"       => \@include,
+    "exclude|e=s"       => \@exclude,
+    "timeout|t=s"       => \$SNMP_OPTIONS->{timeout},
+    "community|c=s"     => \$SNMP_OPTIONS->{community},
+    "port|p=s"          => \$SNMP_OPTIONS->{port},
+    "protocol|P=s"      => \$SNMP_OPTIONS->{version},
+    "domain=s"          => \$SNMP_OPTIONS->{domain},
+    "username=s"        => \$SNMP_OPTIONS->{username},
+    "authpassword=s"    => \$SNMP_OPTIONS->{authpassword},
+    "authprotocol=s"    => \$SNMP_OPTIONS->{authprotocol},
+    "privpassword=s"    => \$SNMP_OPTIONS->{privpassword},
+    "privprotocol=s"    => \$SNMP_OPTIONS->{privprotocol},
+    "contextengineid=s" => \$SNMP_OPTIONS->{contextengineid},
+    "contextname=s"     => \$SNMP_OPTIONS->{contextname},
+  ) or exit_error("invalid command line arguments!", 1);
+
+  if ($version) {
+    print "Version: $VERSION\n";
+    exit(3);
+  }
+
+  pod2usage(-verbose => 1, -exitval => 3) if($help);
+
+  exit_error("Please specify a host address!", 1) if ! $ADDRESS;
+
+  foreach (@include) {
+    push @$INCLUDE, split(/,/, $_);
+  }
+  foreach (@exclude) {
+    push @$EXCLUDE, split(/,/, $_);
+  }
+}
+
+# create the SNMP session, with proper options
+sub snmp_session {
+  my $options = {hostname => $ADDRESS};
+  foreach (keys %$SNMP_OPTIONS) {
+    $options->{$_} = $SNMP_OPTIONS->{$_} if defined $SNMP_OPTIONS->{$_};
+  }
+  my ($session, $error) = Net::SNMP->session(%$options);
+  exit_error("SNMP session error: $error") if $error;
+  return $session;
+}
+
+# get an SNMP table
+sub get_table {
+  my $mib = shift;
+  my $table = shift;
+
+  if (!exists $MIBS->{$mib}->{$table}) {
+    exit_error("there is no table $table in MIB $mib!");
+  }
+
+  my $result = $SNMP->get_table(
+    -baseoid => $MIBS->{$mib}->{$table},
+  );
+  if (my $error = $SNMP->error()) {
+    exit_error("SNMP get_table: ".$error);
+  }
+  return resolve_names($mib, $table, $result);
+}
+
+# resolve OIDs into names
+sub resolve_names {
+  my $mib = shift;
+  my $table = shift;
+  my $snmpdata = shift;
+
+  my $oids;
+  my $mib_h = $MIBS->{$mib};
+
+  foreach (keys %$mib_h) {
+    my $oid = $mib_h->{$_};
+    next if ($_ =~ /Table|Entry$/);
+    if ($oid =~ /^\Q$MIBS->{$mib}->{$table}\E\./) {
+      $oids->{$oid} = $_;
+    }
+  }
+    
+  my @oidkeys = sort keys %$oids;
+
+  my $result;
+  foreach my $oid (keys %$snmpdata) {
+    my ($name, $index);
+    foreach (@oidkeys) {
+      if ($oid =~ /^\Q$_\E\.(.+)$/) {
+        $name = $oids->{$_};
+        $index = $1;
+        last;
+      }
+    }
+    if (!$name) {
+      warn "Could not resolve OID $oid!";
+      next;
+    }
+
+    $result->{$index}->{$name} = $snmpdata->{$oid};
+    if (!exists $result->{$index}->{index}) {
+      $result->{$index}->{index} = $index;
+    }
+  }
+
+  return $result;
+}
+
+# query data and calculate the status
+sub collect_monitors {
+  my $result = get_table('DCSW-SSV-MONITOR-MIB', 'monitorTable');
+
+  foreach my $index (keys %$result) {
+    my $e = $result->{$index};
+    # calculate monitor type from monitorId
+    # by stripping weird instance IDs from the string
+    if (exists $e->{monitorId} and exists $e->{monitorTargetId}) {
+      my $type = $e->{monitorId};
+      my $targetid = $e->{monitorTargetId};
+      $type =~ s/(?:`1)?<\Q$targetid\E>/-/;
+      # remove dumb suffixes
+      $type =~ s/(?:State)?Monitor-/-/;
+      $type =~ s/-$//;
+      $e->{type} = $type;
+    }
+
+
+    my $staten = lc $e->{monitorState};
+    if (exists $STATES->{$staten}) {
+      $e->{severityCode} = $STATES->{$staten};
+      $e->{severity} = $STATENAMES->{$STATES->{$staten}};
+    }
+    else {
+      $e->{severityCode} = 3;
+      $e->{severity} = $STATENAMES->{3};
+    }
+  }
+  return $result;
+}
+
+# output a text based table
+sub tableize {
+  my $hash = shift;
+  my $fields = shift;
+  my $sort = shift;
+
+  my $field_h = {};
+
+  # sort keys by field
+  my @keys = keys %$hash;
+  if (defined $sort) {
+    @keys = sort $sort @keys;
+  }
+
+  # count max length
+  foreach (@$fields) {
+    $field_h->{$_} = length($_);
+  }
+  foreach (@keys) {
+    my $h = $hash->{$_};
+    foreach (@$fields) {
+      my $l = length $h->{$_};
+      if ($l > $field_h->{$_}) {
+        $field_h->{$_} = $l;
+      }
+    }
+  }
+
+  # print header
+  my $total = 0;
+  foreach (@$fields) {
+    my $l = length($_);
+    my $w = $field_h->{$_} - $l + 1;
+    print $_ . ' ' x $w;
+    $total += ($w+$l);
+  }
+  print "\n";
+  print "-" x $total . "\n";
+
+  # print data
+  foreach (@keys) {
+    my $h = $hash->{$_};
+    foreach (@$fields) {
+      my $v = $h->{$_};
+      my $w = $field_h->{$_} - length($v) + 1;
+      print $v . ' ' x $w;
+    }
+    print "\n";
+  }
+}
+
+sub main {
+  get_options();
+  $SNMP = snmp_session();
+
+  # check for cache
+  my $cache_valid = 0;
+  my $cache_timestamp;
+  my $cache_file;
+  if ($CACHE > 0) {
+    my $fileadd = $ADDRESS;
+    $fileadd =~ s/[^\w]+/_/g;
+    $cache_file = $CACHENAME.$fileadd;
+
+    if (-f $cache_file) {
+      $cache_timestamp = (stat($cache_file))[9];
+      my $age = (time - $cache_timestamp) / 60;
+      if ($age < $CACHE) {
+        $cache_valid = 1;
+      }
+    }
+  }
+
+  my $monitors = {};
+  if ($cache_valid) {
+    if (open CACHE, '<', $cache_file) {
+      {
+        local $/;
+        $monitors = eval <CACHE>;
+      }
+      close CACHE;
+    }
+    else {
+      warn "Could not read from cache: $!";
+    }
+  }
+  else {
+    # update cache
+    $monitors = collect_monitors();
+    
+    if ($CACHE > 0) {
+      # save cache
+      if (open CACHE, '>', $cache_file) {
+        print CACHE dump $monitors;
+        close CACHE;
+      }
+      else {
+        warn "Could not save cache: $!";
+      }
+    }
+  }
+
+  my $status = -1;
+  my $counters = {};
+
+  my $filtered = {};
+
+  foreach (keys %$monitors) {
+    my $m = $monitors->{$_};
+
+    # excludes
+    if (defined $EXCLUDE and @$EXCLUDE > 0) {
+      my $out = 0;
+      foreach(@$EXCLUDE) {
+        if ($m->{type} =~ /\Q$_\E/i) {
+          $out = 1;
+          last;
+        }
+      }
+      next if $out;
+    }
+    # includes
+    if (defined $INCLUDE and @$INCLUDE > 0) {
+      my $in = 0;
+      foreach(@$INCLUDE) {
+        if ($m->{type} =~ /\Q$_\E/i) {
+          $in = 1;
+          last;
+        }
+      }
+      next if ! $in;
+    }
+
+    # put into filtered list
+    $filtered->{$_} = $m;
+    
+    # calculate end status
+    if (exists $m->{severityCode}) {
+      my $s = $m->{severityCode};
+      if ($s != 3 and $s > $status) {
+        $status = $m->{severityCode};
+      }
+      if (exists $counters->{$s}) {
+        $counters->{$s}++;
+      }
+      else {
+        $counters->{$s} = 1;
+      }
+    }
+  }
+
+  my $summary = sprintf "Found %d monitors", scalar(keys %$filtered);
+
+  foreach (sort { $b <=> $a } keys(%$counters)) {
+    $summary .= sprintf(", %d %s", $counters->{$_}, $STATENAMES->{$_});
+  }
+
+  print "$summary\n";
+  if ($cache_valid and defined $cache_timestamp) {
+    printf "Cached data from: %s\n", strftime("%F %H:%M:%S", localtime($cache_timestamp));
+  }
+
+  tableize(
+    $filtered,
+    [ 'type', 'monitorTargetCaption', 'monitorState', 'severity', 'monitorStateMessage' ],
+    sub {
+      $filtered->{$b}->{severityCode} <=> $filtered->{$a}->{severityCode} || $filtered->{$a}->{type} cmp $filtered->{$b}->{type}
+    }
+  );
+
+  $status = 3 if ($status < 0);
+  exit($status);
+}
+main;
+
+# vi: ts=2 sw=2 expandtab :
