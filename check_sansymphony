@@ -71,6 +71,14 @@ SNMP domain to use (udp, udp6, tcp, tcp6)
 
 SNMP protocol to use (either 1, 2 or 3)
 
+=item B<--cache>
+
+Cache SNMP data locally for usage by multiple services.
+
+The SNMP data is stored in /tmp/check_sansymphony_<address>
+
+Value of this parameter is amount of minutes the cache is valid.
+
 =item B<--include, -i>
 
 Included monitor types (first column)
@@ -318,11 +326,11 @@ sub collect_monitors {
     my $staten = lc $e->{monitorState};
     if (exists $STATES->{$staten}) {
       $e->{severityCode} = $STATES->{$staten};
-      $e->{severity} = $STATENAMES->{$STATES->{$staten}};
+      $e->{severity} = "[".$STATENAMES->{$STATES->{$staten}}."]";
     }
     else {
       $e->{severityCode} = 3;
-      $e->{severity} = $STATENAMES->{3};
+      $e->{severity} = "[".$STATENAMES->{3}."]";
     }
   }
   return $result;
