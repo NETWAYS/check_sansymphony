@@ -47,6 +47,10 @@ Print the help
 
 Host address of the SNMP device
 
+Can be a comma separated list, so the plugin will try to reach one of them.
+
+If one of the node answers, the results are displayed.
+
 =item B<--timeout, -t>
 
 Timeout in seconds for a SNMP request.
@@ -140,17 +144,16 @@ my $VERSION = 0.1;
 
 my $CACHE = 0;
 my $CACHENAME = '/tmp/check_sansymphony_'; # suffixed by address
-my $ADDRESS;
 
+my $ADDRESS;
 my $INCLUDE = ();
 my $EXCLUDE = ();
 
 my $SNMP;
 my $SNMP_OPTIONS = {
- community  => 'public',
- timeout    => 10,
- #version    => 2,
- #maxmsgsize => 65535,
+ community => 'public',
+ timeout   => 10,
+ retries   => 0,
 };
 
 # MIBs we should know and care about
@@ -193,12 +196,12 @@ sub exit_error {
 # parse options
 sub get_options {
   my ($help, $version);
-  my (@include, @exclude);
+  my (@include, @exclude, @address);
   GetOptions (
     "help|h"            => \$help,
     "version|V"         => \$version,
     "cache=i"           => \$CACHE,
-    "hostname|H=s"      => \$ADDRESS,
+    "hostname|H=s"      => \@address,
     "include|i=s"       => \@include,
     "exclude|e=s"       => \@exclude,
     "timeout|t=s"       => \$SNMP_OPTIONS->{timeout},
@@ -222,8 +225,12 @@ sub get_options {
 
   pod2usage(-verbose => 1, -exitval => 3) if($help);
 
-  exit_error("Please specify a host address!", 1) if ! $ADDRESS;
-
+  if (@address == 0) {
+    exit_error("Please specify a host address!", 1);
+  }
+  foreach (@address) {
+    push @$ADDRESS, split(/,/, $_);
+  }
   foreach (@include) {
     push @$INCLUDE, split(/,/, $_);
   }
@@ -234,7 +241,7 @@ sub get_options {
 
 # create the SNMP session, with proper options
 sub snmp_session {
-  my $options = {hostname => $ADDRESS};
+  my $options = {hostname => shift};
   foreach (keys %$SNMP_OPTIONS) {
     $options->{$_} = $SNMP_OPTIONS->{$_} if defined $SNMP_OPTIONS->{$_};
   }
@@ -255,10 +262,12 @@ sub get_table {
   my $result = $SNMP->get_table(
     -baseoid => $MIBS->{$mib}->{$table},
   );
-  if (my $error = $SNMP->error()) {
-    exit_error("SNMP get_table: ".$error);
+  if ($SNMP->error()) {
+    return {};
   }
-  return resolve_names($mib, $table, $result);
+  else {
+    return resolve_names($mib, $table, $result);
+  }
 }
 
 # resolve OIDs into names
@@ -389,14 +398,13 @@ sub tableize {
 
 sub main {
   get_options();
-  $SNMP = snmp_session();
 
   # check for cache
   my $cache_valid = 0;
   my $cache_timestamp;
   my $cache_file;
   if ($CACHE > 0) {
-    my $fileadd = $ADDRESS;
+    my $fileadd = join("_", @$ADDRESS);
     $fileadd =~ s/[^\w]+/_/g;
     $cache_file = $CACHENAME.$fileadd;
 
@@ -423,9 +431,18 @@ sub main {
     }
   }
   else {
-    # update cache
-    $monitors = collect_monitors();
+    # try to reach one of the addresses
+    foreach (@$ADDRESS) {
+      $SNMP = snmp_session($_);
+      $monitors = collect_monitors();
+      last if (scalar(keys %$monitors) > 0);
+    }
+    # see if we had an SNMP error at last
+    if (my $error = $SNMP->error()) {
+      exit_error("SNMP: ".$error);
+    }
     
+    # fill the cache if enabled
     if ($CACHE > 0) {
       # save cache
       if (open CACHE, '>', $cache_file) {
