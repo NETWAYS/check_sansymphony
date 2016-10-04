@@ -99,6 +99,22 @@ List of comma separated strings, can be specified multiple times.
 
 Default: none
 
+=item B<--exclude-type>
+
+Excluded monitor types (regex pattern)
+
+Can be specified multiple times.
+
+Default: none
+
+=item B<--exclude-target-caption>
+
+Excluded monitor target caption (regex pattern)
+
+Can be specified multiple times.
+
+Default: none
+
 =item B<--username>
 
 SNMP username for SNMPv3
@@ -148,6 +164,10 @@ my $CACHENAME = '/tmp/check_sansymphony_'; # suffixed by address
 my $ADDRESS;
 my $INCLUDE = ();
 my $EXCLUDE = ();
+my $EXCLUDE_TYPE = ();
+my $EXCLUDE_TARGET_CAPTION = ();
+
+my $DEBUG_TEST = 0;
 
 my $SNMP;
 my $SNMP_OPTIONS = {
@@ -195,8 +215,8 @@ sub exit_error {
 
 # parse options
 sub get_options {
-  my ($help, $version);
-  my (@include, @exclude, @address);
+  my ($help, $version, $debug_test);
+  my (@include, @exclude, @exclude_type, @exclude_target_caption, @address);
   GetOptions (
     "help|h"            => \$help,
     "version|V"         => \$version,
@@ -204,6 +224,8 @@ sub get_options {
     "hostname|H=s"      => \@address,
     "include|i=s"       => \@include,
     "exclude|e=s"       => \@exclude,
+    "exclude-type=s"    => \@exclude_type,
+    "exclude-target-caption=s" => \@exclude_target_caption,
     "timeout|t=s"       => \$SNMP_OPTIONS->{timeout},
     "community|c=s"     => \$SNMP_OPTIONS->{community},
     "port|p=s"          => \$SNMP_OPTIONS->{port},
@@ -216,6 +238,7 @@ sub get_options {
     "privprotocol=s"    => \$SNMP_OPTIONS->{privprotocol},
     "contextengineid=s" => \$SNMP_OPTIONS->{contextengineid},
     "contextname=s"     => \$SNMP_OPTIONS->{contextname},
+    "debug-test"        => \$DEBUG_TEST,
   ) or exit_error("invalid command line arguments!", 1);
 
   if ($version) {
@@ -236,6 +259,12 @@ sub get_options {
   }
   foreach (@exclude) {
     push @$EXCLUDE, split(/,/, $_);
+  }
+  foreach (@exclude_type) {
+    push @$EXCLUDE_TYPE, split(/,/, $_);
+  }
+  foreach (@exclude_target_caption) {
+    push @$EXCLUDE_TARGET_CAPTION, split(/,/, $_);
   }
 }
 
@@ -315,7 +344,13 @@ sub resolve_names {
 
 # query data and calculate the status
 sub collect_monitors {
-  my $result = get_table('DCSW-SSV-MONITOR-MIB', 'monitorTable');
+  my $result;
+
+  if ($DEBUG_TEST) {
+    $result = get_test_monitors();
+  } else {
+    $result = get_table('DCSW-SSV-MONITOR-MIB', 'monitorTable');
+  }
 
   foreach my $index (keys %$result) {
     my $e = $result->{$index};
@@ -396,6 +431,38 @@ sub tableize {
   }
 }
 
+sub get_test_monitors {
+
+  my $monitors = {};
+  # DEBUG
+  $monitors->{1}->{type} = "ClientMachine";
+  $monitors->{1}->{monitorTargetCaption} = "replica-654645-546765-346346";
+  $monitors->{1}->{monitorState} = "Attention";
+  $monitors->{1}->{monitorStateMessage} = "Unknown";
+
+  $monitors->{2}->{type} = "ScsiPortConnection";
+  $monitors->{2}->{monitorTargetCaption} = "Server iSCSI Port 2";
+  $monitors->{2}->{monitorState} = "Attention";
+  $monitors->{2}->{monitorStateMessage} = "Not connected";
+
+  $monitors->{3}->{type} = "ServeriScsiPort";
+  $monitors->{3}->{monitorTargetCaption} = "Server iSCSI Port 2";
+  $monitors->{3}->{monitorState} = "Critical";
+  $monitors->{3}->{monitorStateMessage} = "Not present";
+
+  $monitors->{4}->{type} = "VimVirtualMachinePower";
+  $monitors->{4}->{monitorTargetCaption} = "testsql";
+  $monitors->{4}->{monitorState} = "Warning";
+  $monitors->{4}->{monitorStateMessage} = "Powered off";
+
+  $monitors->{5}->{type} = "VimVirtualMachinePower";
+  $monitors->{5}->{monitorTargetCaption} = "replica-abcdef-ghijkl-mnopqr";
+  $monitors->{5}->{monitorState} = "Warning";
+  $monitors->{5}->{monitorStateMessage} = "Powered off";
+
+  return $monitors;
+}
+
 sub main {
   get_options();
 
@@ -429,8 +496,7 @@ sub main {
     else {
       warn "Could not read from cache: $!";
     }
-  }
-  else {
+  } else {
     # try to reach one of the addresses
     foreach (@$ADDRESS) {
       $SNMP = snmp_session($_);
@@ -474,6 +540,34 @@ sub main {
       }
       next if $out;
     }
+
+    # exclude type (regex)
+    if (defined $EXCLUDE_TYPE and @$EXCLUDE_TYPE > 0) {
+      my $out = 0;
+      foreach(@$EXCLUDE_TYPE) {
+        if ($m->{type} =~ $_) {
+          $out = 1;
+          last;
+        }
+      }
+      next if $out;
+    }
+
+    #print @$EXCLUDE_TARGET_CAPTION;
+    # exclude target caption (regex)
+    if (defined $EXCLUDE_TARGET_CAPTION and @$EXCLUDE_TARGET_CAPTION > 0) {
+      my $out_target_caption = 0;
+      foreach(@$EXCLUDE_TARGET_CAPTION) {
+        #print "Testing $m->{monitorTargetCaption} against $_\n";
+        if ($m->{monitorTargetCaption} =~ $_) {
+          $out_target_caption = 1;
+          #print "DEBUG: Found match for $m->{monitorTargetCaption} and $_";
+          last;
+        }
+      }
+      next if $out_target_caption;
+    }
+
     # includes
     if (defined $INCLUDE and @$INCLUDE > 0) {
       my $in = 0;
