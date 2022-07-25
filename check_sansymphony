@@ -238,6 +238,7 @@ sub get_options {
     "privprotocol=s"    => \$SNMP_OPTIONS->{privprotocol},
     "contextengineid=s" => \$SNMP_OPTIONS->{contextengineid},
     "contextname=s"     => \$SNMP_OPTIONS->{contextname},
+    "maxMessageSize=s"  => \$SNMP_OPTIONS->{maxmsgsize},
     "debug-test"        => \$DEBUG_TEST,
   ) or exit_error("invalid command line arguments!", 1);
 
