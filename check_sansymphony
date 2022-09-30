@@ -143,6 +143,10 @@ SNMP contextengineid for SNMPv3
 
 SNMP contextname for SNMPv3
 
+=item B<--maxmsgsize>
+
+SNMP maxmsgsize for SNMPv3 (default: 1472)
+
 =back
 
 =cut
