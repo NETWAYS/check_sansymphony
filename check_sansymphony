@@ -143,6 +143,10 @@ SNMP contextengineid for SNMPv3
 
 SNMP contextname for SNMPv3
 
+=item B<--maxmsgsize>
+
+SNMP maxmsgsize for SNMPv3 (default: 1472)
+
 =back
 
 =cut
@@ -174,6 +178,7 @@ my $SNMP_OPTIONS = {
  community => 'public',
  timeout   => 10,
  retries   => 0,
+ maxmsgsize => 1472,
 };
 
 # MIBs we should know and care about
@@ -238,6 +243,7 @@ sub get_options {
     "privprotocol=s"    => \$SNMP_OPTIONS->{privprotocol},
     "contextengineid=s" => \$SNMP_OPTIONS->{contextengineid},
     "contextname=s"     => \$SNMP_OPTIONS->{contextname},
+    "maxMessageSize=s"  => \$SNMP_OPTIONS->{maxmsgsize},
     "debug-test"        => \$DEBUG_TEST,
   ) or exit_error("invalid command line arguments!", 1);
 
@@ -315,7 +321,7 @@ sub resolve_names {
       $oids->{$oid} = $_;
     }
   }
-    
+
   my @oidkeys = sort keys %$oids;
 
   my $result;
@@ -507,7 +513,7 @@ sub main {
     if (my $error = $SNMP->error()) {
       exit_error("SNMP: ".$error);
     }
-    
+
     # fill the cache if enabled
     if ($CACHE > 0) {
       # save cache
@@ -582,7 +588,7 @@ sub main {
 
     # put into filtered list
     $filtered->{$_} = $m;
-    
+
     # calculate end status
     if (exists $m->{severityCode}) {
       my $s = $m->{severityCode};
